@@ -312,6 +312,27 @@ def _proxy_mode_settings(proxy_mode):
         "needs_proxy_binarization": True,
     }
 
+def _resolve_rid_root_budget(root_budget):
+    if root_budget is None:
+        return -1
+
+    if isinstance(root_budget, (bool, np.bool_)) or not isinstance(
+        root_budget,
+        (int, np.integer),
+    ):
+        raise TypeError(
+            "root_budget must be an integer or None."
+        )
+
+    root_budget = int(root_budget)
+
+    if root_budget < 0:
+        raise ValueError(
+            "root_budget must be nonnegative or None."
+        )
+
+    return root_budget
+
 
 def _as_2d_numeric_array(X, name):
     if hasattr(X, "to_numpy"):
@@ -3287,6 +3308,7 @@ class ArborEnum:
         lambda_reg=0.01,
         depth_budget=5,
         rashomon_mult=0.03,
+        root_budget=None,
         additive=False,
         second_rashomon_mult=None,
         multiplier_step_size=0.01,
@@ -3396,6 +3418,16 @@ class ArborEnum:
             raise ValueError(
                 "subsample must be -1 or an integer in "
                 f"[1, {X_original.shape[0]}]."
+            )
+
+        root_budget_int = _resolve_rid_root_budget(
+            root_budget
+        )
+
+        if root_budget_int >= 0 and early_stopping:
+            raise ValueError(
+                "root_budget is not currently supported with "
+                "early_stopping=True."
             )
 
         if n_boot <= 0:
@@ -3584,6 +3616,7 @@ class ArborEnum:
             bool(additive),
             int(importance_interval_mode),
             int(subsample),
+            int(root_budget_int),
         )
 
         if (
@@ -3616,6 +3649,7 @@ class ArborEnum:
         lambda_reg=0.01,
         depth_budget=5,
         rashomon_mult=0.03,
+        root_budget=None,
         lookahead_k=1,
         seed=0,
         memory_efficient=False,
@@ -3684,6 +3718,10 @@ class ArborEnum:
                 f"[1, {X.shape[0]}]."
             )
 
+        root_budget_int = _resolve_rid_root_budget(
+            root_budget
+        )
+
         if not lossless and n_scramble_evals <= 0:
             raise ValueError(
                 "n_scramble_evals must be positive."
@@ -3740,6 +3778,7 @@ class ArborEnum:
             bool(additive),
             int(importance_interval_mode),
             int(subsample),
+            int(root_budget_int),
         )
 
         if (
@@ -3775,6 +3814,7 @@ class ArborEnum:
         lambda_reg=0.01,
         depth_budget=5,
         rashomon_mult=0.03,
+        root_budget=None,
         second_rashomon_mult=None,
         multiplier_step_size=0.01,
         lookahead_k=1,
@@ -3862,6 +3902,16 @@ class ArborEnum:
             raise ValueError(
                 "subsample must be -1 or an integer in "
                 f"[1, {n}]."
+            )
+
+        root_budget_int = _resolve_rid_root_budget(
+            root_budget
+        )
+
+        if root_budget_int >= 0 and use_anytime_fit:
+            raise ValueError(
+                "root_budget is not currently supported with "
+                "use_anytime_fit=True."
             )
 
         if not lossless and n_scramble_evals <= 0:
@@ -4055,6 +4105,7 @@ class ArborEnum:
             bool(additive),
             int(importance_interval_mode),
             int(subsample),
+            int(root_budget_int),
         )
 
         if "bootstrap_importance_intervals" in self._rid_out:

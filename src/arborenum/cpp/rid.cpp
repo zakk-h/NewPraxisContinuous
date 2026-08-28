@@ -342,7 +342,8 @@ RIDResult compute_rid_subtractive_mr_bootstrap(
     // 1 = interval only: min/max global importance over models
     // 2 = interval only: sum of per-sample min/max local importances
     int importance_interval_mode = 0,
-    int subsample = -1
+    int subsample = -1,
+    int root_budget = -1
 ) {
     (void)memory_efficient;
 
@@ -366,6 +367,21 @@ RIDResult compute_rid_subtractive_mr_bootstrap(
         throw std::runtime_error(
             "compute_rid_subtractive_mr_bootstrap: "
             "n_bootstraps must be positive."
+        );
+    }
+
+    if (root_budget < -1) {
+        throw std::runtime_error(
+            "compute_rid_subtractive_mr_bootstrap: "
+            "root_budget must be -1 or a nonnegative integer."
+        );
+    }
+
+    if (root_budget >= 0 && use_anytime_fit) {
+        throw std::runtime_error(
+            "compute_rid_subtractive_mr_bootstrap: "
+            "root_budget is not currently supported with "
+            "use_anytime_fit=true."
         );
     }
 
@@ -628,6 +644,8 @@ RIDResult compute_rid_subtractive_mr_bootstrap(
         (std::size_t)number_of_variables
     );
 
+    int successful_bootstraps = 0;
+
     for (int bootstrap = 0; bootstrap < n_bootstraps; ++bootstrap) {
 
         const auto bootstrap_start = std::chrono::steady_clock::now();
@@ -838,7 +856,7 @@ RIDResult compute_rid_subtractive_mr_bootstrap(
                 static_cast<int8_t>(depth_budget),
                 rashomon_mult,
                 static_cast<int8_t>(lookahead_k),
-                -1,
+                root_budget,
                 use_multipass,
                 rule_list_mode,
                 proxy_style,
@@ -864,8 +882,24 @@ RIDResult compute_rid_subtractive_mr_bootstrap(
             training_memory.finish();
 
         if (!model.result) {
+            cout << "RID bootstrap " << (bootstrap + 1)
+                 << ": skipped because training returned no result\n";
             continue;
         }
+
+        if (
+            root_budget >= 0 &&
+            model.result->min_objective > root_budget
+        ) {
+            cout << "RID bootstrap " << (bootstrap + 1)
+                 << ": skipped because minimum objective "
+                 << model.result->min_objective
+                 << " exceeds root budget "
+                 << root_budget
+                 << "\n";
+            continue;
+        }
+
 
         const double training_seconds =
             std::chrono::duration<double>(
@@ -880,22 +914,48 @@ RIDResult compute_rid_subtractive_mr_bootstrap(
             << ": Rashomon training peak memory = "
             << training_peak_mb << " MB\n";
 
-        const int requested_budget =
-            additive
-                ? static_cast<int>(std::llround(
-                    static_cast<double>(model.result->min_objective)
-                    + rashomon_mult * static_cast<double>(n)
-                ))
-                : static_cast<int>(std::llround(
-                    (1.0 + rashomon_mult) *
-                    static_cast<double>(model.result->min_objective)
-                ));
+                int budget_override;
 
-        const int budget_override = std::min(
-            model.result->budget,
-            requested_budget
-        );
+        if (root_budget >= 0) {
+            // absolute integer user-specified budget.
+            // we are not rescaling for bootstrap/subsample size.
+            budget_override = root_budget;
+        } else {
+            // standard RID behavior
+            const int requested_budget =
+                additive
+                    ? static_cast<int>(std::llround(
+                        static_cast<double>(
+                            model.result->min_objective
+                        )
+                        + rashomon_mult *
+                            static_cast<double>(n)
+                    ))
+                    : static_cast<int>(std::llround(
+                        (1.0 + rashomon_mult) *
+                        static_cast<double>(
+                            model.result->min_objective
+                        )
+                    ));
 
+            budget_override = std::min(
+                model.result->budget,
+                requested_budget
+            );
+        }
+
+        const uint64_t trees_at_budget =
+            model.result->count_leq(budget_override);
+
+        if (trees_at_budget == 0) {
+            cout << "RID bootstrap " << (bootstrap + 1)
+                 << ": skipped because no trees are within budget "
+                 << budget_override
+                 << "\n";
+            continue;
+        }
+
+        ++successful_bootstraps;
      
 
         const double pre_importance_memory_mb =

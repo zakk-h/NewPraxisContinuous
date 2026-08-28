@@ -2101,7 +2101,8 @@ PYBIND11_MODULE(_core, m) {
             std::vector<std::vector<std::vector<int>>> matched_groups_by_variable,
             bool additive,
             int importance_interval_mode,
-            int subsample
+            int subsample,
+            int root_budget
         ) {
             py::buffer_info xinfo = X.request();
             py::buffer_info yinfo = y.request();
@@ -2250,7 +2251,8 @@ PYBIND11_MODULE(_core, m) {
                     matched_groups_by_variable,
                     additive,
                     importance_interval_mode,
-                    subsample
+                    subsample,
+                    root_budget
                 );
 
             py::dict out;
@@ -2292,7 +2294,8 @@ PYBIND11_MODULE(_core, m) {
             std::vector<std::vector<std::vector<int>>>{},
         py::arg("additive") = false,
         py::arg("importance_interval_mode") = 0,
-        py::arg("subsample") = -1
+        py::arg("subsample") = -1,
+        py::arg("root_budget") = -1
         
     );
 
@@ -2366,7 +2369,8 @@ PYBIND11_MODULE(_core, m) {
             std::vector<std::vector<std::vector<int>>> matched_groups_by_variable,
             bool additive,
             int importance_interval_mode,
-            int subsample
+            int subsample,
+            int root_budget
         ) {
             py::buffer_info num_info =
                 X_num.request();
@@ -2966,7 +2970,8 @@ PYBIND11_MODULE(_core, m) {
                     matched_groups_by_variable,
                     additive,
                     importance_interval_mode,
-                    subsample
+                    subsample,
+                    root_budget
                 );
 
             py::dict out;
@@ -3048,7 +3053,8 @@ PYBIND11_MODULE(_core, m) {
             std::vector<std::vector<std::vector<int>>>{},
         py::arg("additive") = false,
         py::arg("importance_interval_mode") = 0,
-        py::arg("subsample") = -1
+        py::arg("subsample") = -1,
+        py::arg("root_budget") = -1
     );
 
     
