@@ -17933,12 +17933,17 @@ private:
 
 
     struct ExactLocalImportanceNumeratorExtrema_ {
+        std::vector<int32_t> point;
         std::vector<int32_t> lower;
         std::vector<int32_t> upper;
         bool all_zero = false;
 
         inline bool empty() const {
-            return !all_zero && lower.empty();
+            return !all_zero && point.empty() && lower.empty();
+        }
+
+        inline bool is_point() const {
+            return !point.empty();
         }
     };
 
@@ -17955,27 +17960,39 @@ private:
         std::size_t i = 0;
     #if ArborEnum_USE_AVX512
         for (; i + 16 <= n; i += 16) {
-            const __m512i dlo =
-                _mm512_loadu_si512((const void*)(dst_lower + i));
-            const __m512i dup =
-                _mm512_loadu_si512((const void*)(dst_upper + i));
-            const __m512i clo =
-                _mm512_loadu_si512((const void*)(cand_lower + i));
-            const __m512i cup =
-                _mm512_loadu_si512((const void*)(cand_upper + i));
-            _mm512_storeu_si512(
-                (void*)(dst_lower + i),
-                _mm512_min_epi32(dlo, clo)
-            );
-            _mm512_storeu_si512(
-                (void*)(dst_upper + i),
-                _mm512_max_epi32(dup, cup)
-            );
+            const __m512i dlo = _mm512_loadu_si512((const void*)(dst_lower + i));
+            const __m512i dup = _mm512_loadu_si512((const void*)(dst_upper + i));
+            const __m512i clo = _mm512_loadu_si512((const void*)(cand_lower + i));
+            const __m512i cup = _mm512_loadu_si512((const void*)(cand_upper + i));
+            _mm512_storeu_si512((void*)(dst_lower + i), _mm512_min_epi32(dlo, clo));
+            _mm512_storeu_si512((void*)(dst_upper + i), _mm512_max_epi32(dup, cup));
         }
     #endif
         for (; i < n; ++i) {
             dst_lower[i] = std::min(dst_lower[i], cand_lower[i]);
             dst_upper[i] = std::max(dst_upper[i], cand_upper[i]);
+        }
+    }
+
+    static inline void fast_update_minmax_point_i32_(
+        int32_t* dst_lower,
+        int32_t* dst_upper,
+        const int32_t* cand,
+        std::size_t n
+    ) {
+        std::size_t i = 0;
+    #if ArborEnum_USE_AVX512
+        for (; i + 16 <= n; i += 16) {
+            const __m512i dlo = _mm512_loadu_si512((const void*)(dst_lower + i));
+            const __m512i dup = _mm512_loadu_si512((const void*)(dst_upper + i));
+            const __m512i c = _mm512_loadu_si512((const void*)(cand + i));
+            _mm512_storeu_si512((void*)(dst_lower + i), _mm512_min_epi32(dlo, c));
+            _mm512_storeu_si512((void*)(dst_upper + i), _mm512_max_epi32(dup, c));
+        }
+    #endif
+        for (; i < n; ++i) {
+            dst_lower[i] = std::min(dst_lower[i], cand[i]);
+            dst_upper[i] = std::max(dst_upper[i], cand[i]);
         }
     }
 
@@ -17991,28 +18008,16 @@ private:
         std::size_t i = 0;
     #if ArborEnum_USE_AVX512
         for (; i + 16 <= n; i += 16) {
-            const __m512i dlo =
-                _mm512_loadu_si512((const void*)(dst_lower + i));
-            const __m512i dup =
-                _mm512_loadu_si512((const void*)(dst_upper + i));
-            const __m512i llo =
-                _mm512_loadu_si512((const void*)(left_lower + i));
-            const __m512i lup =
-                _mm512_loadu_si512((const void*)(left_upper + i));
-            const __m512i rlo =
-                _mm512_loadu_si512((const void*)(right_lower + i));
-            const __m512i rup =
-                _mm512_loadu_si512((const void*)(right_upper + i));
+            const __m512i dlo = _mm512_loadu_si512((const void*)(dst_lower + i));
+            const __m512i dup = _mm512_loadu_si512((const void*)(dst_upper + i));
+            const __m512i llo = _mm512_loadu_si512((const void*)(left_lower + i));
+            const __m512i lup = _mm512_loadu_si512((const void*)(left_upper + i));
+            const __m512i rlo = _mm512_loadu_si512((const void*)(right_lower + i));
+            const __m512i rup = _mm512_loadu_si512((const void*)(right_upper + i));
             const __m512i clo = _mm512_add_epi32(llo, rlo);
             const __m512i cup = _mm512_add_epi32(lup, rup);
-            _mm512_storeu_si512(
-                (void*)(dst_lower + i),
-                _mm512_min_epi32(dlo, clo)
-            );
-            _mm512_storeu_si512(
-                (void*)(dst_upper + i),
-                _mm512_max_epi32(dup, cup)
-            );
+            _mm512_storeu_si512((void*)(dst_lower + i), _mm512_min_epi32(dlo, clo));
+            _mm512_storeu_si512((void*)(dst_upper + i), _mm512_max_epi32(dup, cup));
         }
     #endif
         for (; i < n; ++i) {
@@ -18023,39 +18028,57 @@ private:
         }
     }
 
-    static inline void fast_copy_sum_i32_(
+    static inline void fast_update_minmax_point_sum_i32_(
         int32_t* dst_lower,
         int32_t* dst_upper,
-        const int32_t* left_lower,
-        const int32_t* left_upper,
-        const int32_t* right_lower,
-        const int32_t* right_upper,
+        const int32_t* left,
+        const int32_t* right,
         std::size_t n
     ) {
         std::size_t i = 0;
     #if ArborEnum_USE_AVX512
         for (; i + 16 <= n; i += 16) {
-            const __m512i llo =
-                _mm512_loadu_si512((const void*)(left_lower + i));
-            const __m512i lup =
-                _mm512_loadu_si512((const void*)(left_upper + i));
-            const __m512i rlo =
-                _mm512_loadu_si512((const void*)(right_lower + i));
-            const __m512i rup =
-                _mm512_loadu_si512((const void*)(right_upper + i));
-            _mm512_storeu_si512(
-                (void*)(dst_lower + i),
-                _mm512_add_epi32(llo, rlo)
-            );
-            _mm512_storeu_si512(
-                (void*)(dst_upper + i),
-                _mm512_add_epi32(lup, rup)
-            );
+            const __m512i dlo = _mm512_loadu_si512((const void*)(dst_lower + i));
+            const __m512i dup = _mm512_loadu_si512((const void*)(dst_upper + i));
+            const __m512i l = _mm512_loadu_si512((const void*)(left + i));
+            const __m512i r = _mm512_loadu_si512((const void*)(right + i));
+            const __m512i c = _mm512_add_epi32(l, r);
+            _mm512_storeu_si512((void*)(dst_lower + i), _mm512_min_epi32(dlo, c));
+            _mm512_storeu_si512((void*)(dst_upper + i), _mm512_max_epi32(dup, c));
         }
     #endif
         for (; i < n; ++i) {
-            dst_lower[i] = left_lower[i] + right_lower[i];
-            dst_upper[i] = left_upper[i] + right_upper[i];
+            const int32_t c = left[i] + right[i];
+            dst_lower[i] = std::min(dst_lower[i], c);
+            dst_upper[i] = std::max(dst_upper[i], c);
+        }
+    }
+
+    static inline void fast_update_minmax_point_interval_sum_i32_(
+        int32_t* dst_lower,
+        int32_t* dst_upper,
+        const int32_t* point,
+        const int32_t* int_lower,
+        const int32_t* int_upper,
+        std::size_t n
+    ) {
+        std::size_t i = 0;
+    #if ArborEnum_USE_AVX512
+        for (; i + 16 <= n; i += 16) {
+            const __m512i dlo = _mm512_loadu_si512((const void*)(dst_lower + i));
+            const __m512i dup = _mm512_loadu_si512((const void*)(dst_upper + i));
+            const __m512i p = _mm512_loadu_si512((const void*)(point + i));
+            const __m512i lo = _mm512_add_epi32(p, _mm512_loadu_si512((const void*)(int_lower + i)));
+            const __m512i up = _mm512_add_epi32(p, _mm512_loadu_si512((const void*)(int_upper + i)));
+            _mm512_storeu_si512((void*)(dst_lower + i), _mm512_min_epi32(dlo, lo));
+            _mm512_storeu_si512((void*)(dst_upper + i), _mm512_max_epi32(dup, up));
+        }
+    #endif
+        for (; i < n; ++i) {
+            const int32_t lo = point[i] + int_lower[i];
+            const int32_t up = point[i] + int_upper[i];
+            dst_lower[i] = std::min(dst_lower[i], lo);
+            dst_upper[i] = std::max(dst_upper[i], up);
         }
     }
 
@@ -18068,23 +18091,77 @@ private:
     #if ArborEnum_USE_AVX512
         const __m512i z = _mm512_setzero_si512();
         for (; i + 16 <= n; i += 16) {
-            const __m512i dlo =
-                _mm512_loadu_si512((const void*)(dst_lower + i));
-            const __m512i dup =
-                _mm512_loadu_si512((const void*)(dst_upper + i));
-            _mm512_storeu_si512(
-                (void*)(dst_lower + i),
-                _mm512_min_epi32(dlo, z)
-            );
-            _mm512_storeu_si512(
-                (void*)(dst_upper + i),
-                _mm512_max_epi32(dup, z)
-            );
+            const __m512i dlo = _mm512_loadu_si512((const void*)(dst_lower + i));
+            const __m512i dup = _mm512_loadu_si512((const void*)(dst_upper + i));
+            _mm512_storeu_si512((void*)(dst_lower + i), _mm512_min_epi32(dlo, z));
+            _mm512_storeu_si512((void*)(dst_upper + i), _mm512_max_epi32(dup, z));
         }
     #endif
         for (; i < n; ++i) {
             dst_lower[i] = std::min<int32_t>(dst_lower[i], 0);
             dst_upper[i] = std::max<int32_t>(dst_upper[i], 0);
+        }
+    }
+
+    static inline void fast_add_inplace_i32_(
+        int32_t* dst,
+        const int32_t* src,
+        std::size_t n
+    ) {
+        std::size_t i = 0;
+    #if ArborEnum_USE_AVX512
+        for (; i + 16 <= n; i += 16) {
+            const __m512i a = _mm512_loadu_si512((const void*)(dst + i));
+            const __m512i b = _mm512_loadu_si512((const void*)(src + i));
+            _mm512_storeu_si512((void*)(dst + i), _mm512_add_epi32(a, b));
+        }
+    #endif
+        for (; i < n; ++i) dst[i] += src[i];
+    }
+
+    static inline void fast_add_point_to_interval_inplace_i32_(
+        int32_t* lower,
+        int32_t* upper,
+        const int32_t* point,
+        std::size_t n
+    ) {
+        std::size_t i = 0;
+    #if ArborEnum_USE_AVX512
+        for (; i + 16 <= n; i += 16) {
+            const __m512i p = _mm512_loadu_si512((const void*)(point + i));
+            const __m512i lo = _mm512_loadu_si512((const void*)(lower + i));
+            const __m512i up = _mm512_loadu_si512((const void*)(upper + i));
+            _mm512_storeu_si512((void*)(lower + i), _mm512_add_epi32(lo, p));
+            _mm512_storeu_si512((void*)(upper + i), _mm512_add_epi32(up, p));
+        }
+    #endif
+        for (; i < n; ++i) {
+            lower[i] += point[i];
+            upper[i] += point[i];
+        }
+    }
+
+    static inline void fast_add_interval_inplace_i32_(
+        int32_t* dst_lower,
+        int32_t* dst_upper,
+        const int32_t* src_lower,
+        const int32_t* src_upper,
+        std::size_t n
+    ) {
+        std::size_t i = 0;
+    #if ArborEnum_USE_AVX512
+        for (; i + 16 <= n; i += 16) {
+            const __m512i dlo = _mm512_loadu_si512((const void*)(dst_lower + i));
+            const __m512i dup = _mm512_loadu_si512((const void*)(dst_upper + i));
+            const __m512i slo = _mm512_loadu_si512((const void*)(src_lower + i));
+            const __m512i sup = _mm512_loadu_si512((const void*)(src_upper + i));
+            _mm512_storeu_si512((void*)(dst_lower + i), _mm512_add_epi32(dlo, slo));
+            _mm512_storeu_si512((void*)(dst_upper + i), _mm512_add_epi32(dup, sup));
+        }
+    #endif
+        for (; i < n; ++i) {
+            dst_lower[i] += src_lower[i];
+            dst_upper[i] += src_upper[i];
         }
     }
 
@@ -18097,6 +18174,14 @@ private:
             total += static_cast<int64_t>(x[i]);
         }
         return total;
+    }
+
+    static inline void promote_point_numerator_extrema_(
+        ExactLocalImportanceNumeratorExtrema_& x
+    ) {
+        if (!x.is_point()) return;
+        x.upper = x.point;
+        x.lower = std::move(x.point);
     }
 
     static inline void materialize_zero_numerator_extrema_(
@@ -18117,45 +18202,42 @@ private:
         if (cand.empty()) return;
 
         if (dst.empty()) {
-            if (cand.all_zero) {
-                dst.all_zero = true;
-                return;
-            }
-            dst.lower = cand.lower;
-            dst.upper = cand.upper;
-            dst.all_zero = false;
-            return;
-        }
-
-        if (dst.all_zero) {
-            if (cand.all_zero) return;
-            materialize_zero_numerator_extrema_(dst, n);
-            fast_update_minmax_i32_(
-                dst.lower.data(),
-                dst.upper.data(),
-                cand.lower.data(),
-                cand.upper.data(),
-                n
-            );
+            dst = cand;
             return;
         }
 
         if (cand.all_zero) {
-            fast_include_zero_i32_(
-                dst.lower.data(),
-                dst.upper.data(),
-                n
-            );
+            if (dst.all_zero) return;
+            if (dst.is_point()) promote_point_numerator_extrema_(dst);
+            fast_include_zero_i32_(dst.lower.data(), dst.upper.data(), n);
             return;
         }
 
-        fast_update_minmax_i32_(
-            dst.lower.data(),
-            dst.upper.data(),
-            cand.lower.data(),
-            cand.upper.data(),
-            n
-        );
+        if (dst.all_zero) {
+            dst.all_zero = false;
+            if (cand.is_point()) {
+                dst.lower = cand.point;
+                dst.upper = cand.point;
+            } else {
+                dst.lower = cand.lower;
+                dst.upper = cand.upper;
+            }
+            fast_include_zero_i32_(dst.lower.data(), dst.upper.data(), n);
+            return;
+        }
+
+        if (dst.is_point()) promote_point_numerator_extrema_(dst);
+
+        if (cand.is_point()) {
+            fast_update_minmax_point_i32_(
+                dst.lower.data(), dst.upper.data(), cand.point.data(), n
+            );
+        } else {
+            fast_update_minmax_i32_(
+                dst.lower.data(), dst.upper.data(),
+                cand.lower.data(), cand.upper.data(), n
+            );
+        }
     }
 
     static inline void merge_numerator_extrema_move_(
@@ -18168,7 +18250,39 @@ private:
             dst = std::move(cand);
             return;
         }
-        merge_numerator_extrema_(dst, cand, n);
+
+        if (cand.all_zero) {
+            if (dst.all_zero) return;
+            if (dst.is_point()) promote_point_numerator_extrema_(dst);
+            fast_include_zero_i32_(dst.lower.data(), dst.upper.data(), n);
+            return;
+        }
+
+        if (dst.all_zero) {
+            dst.all_zero = false;
+            if (cand.is_point()) {
+                dst.lower = std::move(cand.point);
+                dst.upper = dst.lower;
+            } else {
+                dst.lower = std::move(cand.lower);
+                dst.upper = std::move(cand.upper);
+            }
+            fast_include_zero_i32_(dst.lower.data(), dst.upper.data(), n);
+            return;
+        }
+
+        if (dst.is_point()) promote_point_numerator_extrema_(dst);
+
+        if (cand.is_point()) {
+            fast_update_minmax_point_i32_(
+                dst.lower.data(), dst.upper.data(), cand.point.data(), n
+            );
+        } else {
+            fast_update_minmax_i32_(
+                dst.lower.data(), dst.upper.data(),
+                cand.lower.data(), cand.upper.data(), n
+            );
+        }
     }
 
     static inline void update_numerator_extrema_from_sum_(
@@ -18185,45 +18299,67 @@ private:
             merge_numerator_extrema_move_(dst, std::move(z), n);
             return;
         }
-
         if (left.all_zero) {
             merge_numerator_extrema_move_(dst, std::move(right), n);
             return;
         }
-
         if (right.all_zero) {
             merge_numerator_extrema_move_(dst, std::move(left), n);
             return;
         }
 
+        const bool lp = left.is_point();
+        const bool rp = right.is_point();
+
         if (dst.empty()) {
-            dst.lower.resize(n);
-            dst.upper.resize(n);
-            fast_copy_sum_i32_(
-                dst.lower.data(),
-                dst.upper.data(),
-                left.lower.data(),
-                left.upper.data(),
-                right.lower.data(),
-                right.upper.data(),
-                n
-            );
+            if (lp && rp) {
+                fast_add_inplace_i32_(left.point.data(), right.point.data(), n);
+                dst = std::move(left);
+            } else if (lp && !rp) {
+                fast_add_point_to_interval_inplace_i32_(
+                    right.lower.data(), right.upper.data(), left.point.data(), n
+                );
+                dst = std::move(right);
+            } else if (!lp && rp) {
+                fast_add_point_to_interval_inplace_i32_(
+                    left.lower.data(), left.upper.data(), right.point.data(), n
+                );
+                dst = std::move(left);
+            } else {
+                fast_add_interval_inplace_i32_(
+                    left.lower.data(), left.upper.data(),
+                    right.lower.data(), right.upper.data(), n
+                );
+                dst = std::move(left);
+            }
             return;
         }
 
-        if (dst.all_zero) {
-            materialize_zero_numerator_extrema_(dst, n);
-        }
+        if (dst.all_zero) materialize_zero_numerator_extrema_(dst, n);
+        if (dst.is_point()) promote_point_numerator_extrema_(dst);
 
-        fast_update_minmax_sum_i32_(
-            dst.lower.data(),
-            dst.upper.data(),
-            left.lower.data(),
-            left.upper.data(),
-            right.lower.data(),
-            right.upper.data(),
-            n
-        );
+        if (lp && rp) {
+            fast_update_minmax_point_sum_i32_(
+                dst.lower.data(), dst.upper.data(),
+                left.point.data(), right.point.data(), n
+            );
+        } else if (lp && !rp) {
+            fast_update_minmax_point_interval_sum_i32_(
+                dst.lower.data(), dst.upper.data(),
+                left.point.data(), right.lower.data(), right.upper.data(), n
+            );
+        } else if (!lp && rp) {
+            fast_update_minmax_point_interval_sum_i32_(
+                dst.lower.data(), dst.upper.data(),
+                right.point.data(), left.lower.data(), left.upper.data(), n
+            );
+        } else {
+            fast_update_minmax_sum_i32_(
+                dst.lower.data(), dst.upper.data(),
+                left.lower.data(), left.upper.data(),
+                right.lower.data(), right.upper.data(), n
+            );
+        }
     }
 
     void build_exact_node_variable_masks_(
@@ -18414,9 +18550,8 @@ private:
         const bool was_empty = acc.empty();
         const bool had_zero = acc.all_zero;
 
-        if (was_empty || had_zero) {
-            acc.lower.assign(n, 0);
-            acc.upper.assign(n, 0);
+        if (was_empty) {
+            acc.point.assign(n, 0);
             acc.all_zero = false;
 
             for (int wi = 0; wi < ctx.n_words; ++wi) {
@@ -18450,26 +18585,22 @@ private:
                                 ];
                         }
                     } else {
-                        if ((wt >> bit) & 1ULL) {
-                            value += donor_count;
-                        }
-                        if ((wo >> bit) & 1ULL) {
-                            value -= ctx.n_eval;
-                        }
+                        if ((wt >> bit) & 1ULL) value += donor_count;
+                        if ((wo >> bit) & 1ULL) value -= ctx.n_eval;
                     }
 
-                    const std::size_t r = static_cast<std::size_t>(row);
-                    if (was_empty) {
-                        acc.lower[r] = value;
-                        acc.upper[r] = value;
-                    } else {
-                        acc.lower[r] = std::min(acc.lower[r], value);
-                        acc.upper[r] = std::max(acc.upper[r], value);
-                    }
+                    acc.point[static_cast<std::size_t>(row)] = value;
                 }
             }
-
             return;
+        }
+
+        if (had_zero) {
+            acc.lower.assign(n, 0);
+            acc.upper.assign(n, 0);
+            acc.all_zero = false;
+        } else if (acc.is_point()) {
+            promote_point_numerator_extrema_(acc);
         }
 
         for (int wi = 0; wi < ctx.n_words; ++wi) {
@@ -18477,8 +18608,7 @@ private:
             const uint64_t wt = wrong_word(state.target_rows, wi);
             const uint64_t special = wo | wt;
             const int base = wi << 6;
-            const int count =
-                std::min(64, ctx.n_eval - base);
+            const int count = std::min(64, ctx.n_eval - base);
 
             if (special == 0ULL) {
                 fast_include_zero_i32_(
@@ -18513,12 +18643,8 @@ private:
                                 ];
                         }
                     } else {
-                        if ((wt >> bit) & 1ULL) {
-                            value += donor_count;
-                        }
-                        if ((wo >> bit) & 1ULL) {
-                            value -= ctx.n_eval;
-                        }
+                        if ((wt >> bit) & 1ULL) value += donor_count;
+                        if ((wo >> bit) & 1ULL) value -= ctx.n_eval;
                     }
                 }
 
@@ -18922,6 +19048,452 @@ private:
             if (!split_acc.empty()) {
                 merge_numerator_extrema_move_(
                     acc,
+                    std::move(split_acc),
+                    n
+                );
+            }
+        }
+
+        return acc;
+    }
+
+
+    std::vector<ExactLocalImportanceNumeratorExtrema_>
+    collect_exact_local_importance_numerator_extrema_all_at_most_(
+        const TreeTrieNode* node,
+        int budget,
+        const Packed& original_mask,
+        const Packed& replacement_root_mask,
+        const std::vector<ExactReplacementState_>& states,
+        const std::vector<uint8_t>& requested,
+        const std::vector<int>& internal_to_variable,
+        const EvalCtx& ctx,
+        const std::vector<Packed>& Y_eval_bits,
+        const Packed* BBwrong_eval,
+        const std::vector<std::vector<int>>* matched_group_of_row_by_variable_eval,
+        const std::vector<std::vector<int>>* matched_group_size_by_variable_eval,
+        const std::vector<uint8_t>* matched_group_effectively_uniform_by_variable_eval,
+        ExactMatchedScratch_* matched_scratch,
+        const ExactNodeVariableMasks_& node_variable_masks
+    ) const {
+        if (!node || budget < 0) return {};
+
+        constexpr int INF = std::numeric_limits<int>::max();
+        if (node->min_objective == INF || node->min_objective > budget) {
+            return {};
+        }
+
+        const int number_of_variables = static_cast<int>(states.size());
+        std::vector<ExactLocalImportanceNumeratorExtrema_> acc(
+            static_cast<std::size_t>(number_of_variables)
+        );
+        std::vector<uint8_t> active = requested;
+        bool any_active = false;
+
+        for (int variable = 0; variable < number_of_variables; ++variable) {
+            const std::size_t j = static_cast<std::size_t>(variable);
+            if (!active[j]) continue;
+            if (
+                !states[j].replacement_feature_used &&
+                !exact_node_can_contain_variable_(
+                    node,
+                    variable,
+                    node_variable_masks
+                )
+            ) {
+                acc[j].all_zero = true;
+                active[j] = 0;
+            } else {
+                any_active = true;
+            }
+        }
+
+        if (!any_active) return acc;
+
+        const std::size_t n = static_cast<std::size_t>(ctx.n_eval);
+
+        for (const auto& leaf : node->leaves) {
+            if (leaf.loss > budget) continue;
+
+            for (int variable = 0; variable < number_of_variables; ++variable) {
+                const std::size_t j = static_cast<std::size_t>(variable);
+                if (!active[j]) continue;
+
+                const std::vector<int>* group_of_row_ptr =
+                    matched_group_of_row_by_variable_eval
+                        ? &(*matched_group_of_row_by_variable_eval)[j]
+                        : nullptr;
+                const std::vector<int>* group_size_ptr =
+                    matched_group_size_by_variable_eval
+                        ? &(*matched_group_size_by_variable_eval)[j]
+                        : nullptr;
+                const bool matched_effectively_uniform =
+                    matched_group_effectively_uniform_by_variable_eval &&
+                    (*matched_group_effectively_uniform_by_variable_eval)[j] != 0;
+
+                update_numerator_extrema_from_leaf_(
+                    acc[j],
+                    original_mask,
+                    states[j],
+                    leaf.prediction,
+                    ctx,
+                    Y_eval_bits,
+                    BBwrong_eval,
+                    group_of_row_ptr,
+                    group_size_ptr,
+                    matched_effectively_uniform,
+                    matched_scratch
+                );
+            }
+        }
+
+        for (const auto& split : node->splits) {
+            const TreeTrieNode* L = split.left.get();
+            const TreeTrieNode* R = split.right.get();
+            if (!L || !R) continue;
+
+            const int minL = L->min_objective;
+            const int minR = R->min_objective;
+            if (minL == INF || minR == INF) continue;
+            if (minL + minR > budget) continue;
+
+            if (
+                split.feature < 0 ||
+                split.feature >= static_cast<int>(internal_to_variable.size())
+            ) {
+                throw std::runtime_error(
+                    "Exact local all-variable interval evaluation saw an invalid split feature."
+                );
+            }
+
+            const int split_variable =
+                internal_to_variable[static_cast<std::size_t>(split.feature)];
+            if (split_variable < 0 || split_variable >= number_of_variables) {
+                throw std::runtime_error(
+                    "Split feature is not mapped to an original variable."
+                );
+            }
+
+            const Packed& Xf =
+                ctx.X_bits_eval[static_cast<std::size_t>(split.feature)];
+
+            Packed original_left(static_cast<std::size_t>(ctx.n_words));
+            Packed original_right(static_cast<std::size_t>(ctx.n_words));
+            and_bits_eval(
+                original_mask,
+                Xf,
+                original_left,
+                ctx.n_words,
+                ctx.tail_mask
+            );
+            andnot_bits_eval(
+                original_mask,
+                Xf,
+                original_right,
+                ctx.n_words,
+                ctx.tail_mask
+            );
+
+            std::vector<ExactReplacementState_> left_states(
+                static_cast<std::size_t>(number_of_variables)
+            );
+            std::vector<ExactReplacementState_> right_states(
+                static_cast<std::size_t>(number_of_variables)
+            );
+
+            for (int variable = 0; variable < number_of_variables; ++variable) {
+                const std::size_t j = static_cast<std::size_t>(variable);
+                if (!active[j]) continue;
+
+                const auto& cur = states[j];
+                auto& ls = left_states[j];
+                auto& rs = right_states[j];
+
+                if (!cur.replacement_feature_used) {
+                    if (variable == split_variable) {
+                        ls.replacement_feature_used = true;
+                        rs.replacement_feature_used = true;
+                        ls.target_rows = original_mask;
+                        rs.target_rows = original_mask;
+                        ls.replacement_values = Packed(
+                            static_cast<std::size_t>(ctx.n_words)
+                        );
+                        rs.replacement_values = Packed(
+                            static_cast<std::size_t>(ctx.n_words)
+                        );
+                        and_bits_eval(
+                            replacement_root_mask,
+                            Xf,
+                            ls.replacement_values,
+                            ctx.n_words,
+                            ctx.tail_mask
+                        );
+                        andnot_bits_eval(
+                            replacement_root_mask,
+                            Xf,
+                            rs.replacement_values,
+                            ctx.n_words,
+                            ctx.tail_mask
+                        );
+                    }
+                    continue;
+                }
+
+                ls.replacement_feature_used = true;
+                rs.replacement_feature_used = true;
+                ls.target_rows = Packed(static_cast<std::size_t>(ctx.n_words));
+                rs.target_rows = Packed(static_cast<std::size_t>(ctx.n_words));
+                ls.replacement_values = Packed(static_cast<std::size_t>(ctx.n_words));
+                rs.replacement_values = Packed(static_cast<std::size_t>(ctx.n_words));
+
+                if (variable == split_variable) {
+                    ls.target_rows.w = cur.target_rows.w;
+                    rs.target_rows.w = cur.target_rows.w;
+                    and_bits_eval(
+                        cur.replacement_values,
+                        Xf,
+                        ls.replacement_values,
+                        ctx.n_words,
+                        ctx.tail_mask
+                    );
+                    andnot_bits_eval(
+                        cur.replacement_values,
+                        Xf,
+                        rs.replacement_values,
+                        ctx.n_words,
+                        ctx.tail_mask
+                    );
+                } else {
+                    and_bits_eval(
+                        cur.target_rows,
+                        Xf,
+                        ls.target_rows,
+                        ctx.n_words,
+                        ctx.tail_mask
+                    );
+                    andnot_bits_eval(
+                        cur.target_rows,
+                        Xf,
+                        rs.target_rows,
+                        ctx.n_words,
+                        ctx.tail_mask
+                    );
+                    ls.replacement_values.w = cur.replacement_values.w;
+                    rs.replacement_values.w = cur.replacement_values.w;
+                }
+            }
+
+            const int left_budget = std::min(L->budget, budget - minR);
+            const int right_budget = std::min(R->budget, budget - minL);
+
+            std::vector<uint8_t> shared_requested = active;
+            const std::size_t split_j = static_cast<std::size_t>(split_variable);
+            const bool do_split_variable = shared_requested[split_j] != 0;
+            shared_requested[split_j] = 0;
+
+            bool any_shared = false;
+            for (uint8_t x : shared_requested) {
+                if (x) {
+                    any_shared = true;
+                    break;
+                }
+            }
+
+            if (any_shared) {
+                auto left_all =
+                    collect_exact_local_importance_numerator_extrema_all_at_most_(
+                        L,
+                        left_budget,
+                        original_left,
+                        replacement_root_mask,
+                        left_states,
+                        shared_requested,
+                        internal_to_variable,
+                        ctx,
+                        Y_eval_bits,
+                        BBwrong_eval,
+                        matched_group_of_row_by_variable_eval,
+                        matched_group_size_by_variable_eval,
+                        matched_group_effectively_uniform_by_variable_eval,
+                        matched_scratch,
+                        node_variable_masks
+                    );
+                auto right_all =
+                    collect_exact_local_importance_numerator_extrema_all_at_most_(
+                        R,
+                        right_budget,
+                        original_right,
+                        replacement_root_mask,
+                        right_states,
+                        shared_requested,
+                        internal_to_variable,
+                        ctx,
+                        Y_eval_bits,
+                        BBwrong_eval,
+                        matched_group_of_row_by_variable_eval,
+                        matched_group_size_by_variable_eval,
+                        matched_group_effectively_uniform_by_variable_eval,
+                        matched_scratch,
+                        node_variable_masks
+                    );
+
+                if (!left_all.empty() && !right_all.empty()) {
+                    for (int variable = 0; variable < number_of_variables; ++variable) {
+                        const std::size_t j = static_cast<std::size_t>(variable);
+                        if (!shared_requested[j]) continue;
+                        if (left_all[j].empty() || right_all[j].empty()) continue;
+                        update_numerator_extrema_from_sum_(
+                            acc[j],
+                            std::move(left_all[j]),
+                            std::move(right_all[j]),
+                            n
+                        );
+                    }
+                }
+            }
+
+            if (!do_split_variable) continue;
+
+            const std::vector<int>* group_of_row_ptr =
+                matched_group_of_row_by_variable_eval
+                    ? &(*matched_group_of_row_by_variable_eval)[split_j]
+                    : nullptr;
+            const std::vector<int>* group_size_ptr =
+                matched_group_size_by_variable_eval
+                    ? &(*matched_group_size_by_variable_eval)[split_j]
+                    : nullptr;
+            const bool matched_effectively_uniform =
+                matched_group_effectively_uniform_by_variable_eval &&
+                (*matched_group_effectively_uniform_by_variable_eval)[split_j] != 0;
+
+            L->ensure_hist_built();
+            R->ensure_hist_built();
+
+            const int max_left_budget =
+                std::min(L->budget, budget - minR);
+            const int max_right_budget =
+                std::min(R->budget, budget - minL);
+
+            std::size_t left_count = 0;
+            for (const auto& e : L->hist) {
+                if (e.obj > max_left_budget) break;
+                ++left_count;
+            }
+            std::size_t right_count = 0;
+            for (const auto& e : R->hist) {
+                if (e.obj > max_right_budget) break;
+                ++right_count;
+            }
+
+            ExactLocalImportanceNumeratorExtrema_ split_acc;
+
+            if (left_count <= right_count) {
+                for (const auto& e : L->hist) {
+                    if (e.obj > max_left_budget) break;
+                    const int bL = e.obj;
+                    const int bR = std::min(R->budget, budget - bL);
+                    if (bR < minR) continue;
+
+                    auto left_ext =
+                        collect_exact_local_importance_numerator_extrema_at_most_(
+                            L,
+                            bL,
+                            original_left,
+                            replacement_root_mask,
+                            left_states[split_j],
+                            split_variable,
+                            internal_to_variable,
+                            ctx,
+                            Y_eval_bits,
+                            BBwrong_eval,
+                            group_of_row_ptr,
+                            group_size_ptr,
+                            matched_effectively_uniform,
+                            matched_scratch,
+                            node_variable_masks
+                        );
+                    auto right_ext =
+                        collect_exact_local_importance_numerator_extrema_at_most_(
+                            R,
+                            bR,
+                            original_right,
+                            replacement_root_mask,
+                            right_states[split_j],
+                            split_variable,
+                            internal_to_variable,
+                            ctx,
+                            Y_eval_bits,
+                            BBwrong_eval,
+                            group_of_row_ptr,
+                            group_size_ptr,
+                            matched_effectively_uniform,
+                            matched_scratch,
+                            node_variable_masks
+                        );
+                    if (left_ext.empty() || right_ext.empty()) continue;
+                    update_numerator_extrema_from_sum_(
+                        split_acc,
+                        std::move(left_ext),
+                        std::move(right_ext),
+                        n
+                    );
+                }
+            } else {
+                for (const auto& e : R->hist) {
+                    if (e.obj > max_right_budget) break;
+                    const int bR = e.obj;
+                    const int bL = std::min(L->budget, budget - bR);
+                    if (bL < minL) continue;
+
+                    auto left_ext =
+                        collect_exact_local_importance_numerator_extrema_at_most_(
+                            L,
+                            bL,
+                            original_left,
+                            replacement_root_mask,
+                            left_states[split_j],
+                            split_variable,
+                            internal_to_variable,
+                            ctx,
+                            Y_eval_bits,
+                            BBwrong_eval,
+                            group_of_row_ptr,
+                            group_size_ptr,
+                            matched_effectively_uniform,
+                            matched_scratch,
+                            node_variable_masks
+                        );
+                    auto right_ext =
+                        collect_exact_local_importance_numerator_extrema_at_most_(
+                            R,
+                            bR,
+                            original_right,
+                            replacement_root_mask,
+                            right_states[split_j],
+                            split_variable,
+                            internal_to_variable,
+                            ctx,
+                            Y_eval_bits,
+                            BBwrong_eval,
+                            group_of_row_ptr,
+                            group_size_ptr,
+                            matched_effectively_uniform,
+                            matched_scratch,
+                            node_variable_masks
+                        );
+                    if (left_ext.empty() || right_ext.empty()) continue;
+                    update_numerator_extrema_from_sum_(
+                        split_acc,
+                        std::move(left_ext),
+                        std::move(right_ext),
+                        n
+                    );
+                }
+            }
+
+            if (!split_acc.empty()) {
+                merge_numerator_extrema_move_(
+                    acc[split_j],
                     std::move(split_acc),
                     n
                 );
@@ -20699,7 +21271,6 @@ public:
             return out;
         }
         
-        // one variable at a time to avoid dense matrix
         const double inv_n =
             1.0 / static_cast<double>(setup.ctx.n_eval);
 
@@ -20710,6 +21281,126 @@ public:
             number_of_variables,
             node_variable_masks
         );
+
+
+        static constexpr bool SAMPLEWISE_ALL_FEATURES_AT_ONCE = true;
+
+        if (SAMPLEWISE_ALL_FEATURES_AT_ONCE) {
+            std::vector<ExactReplacementState_> root_states(
+                static_cast<std::size_t>(number_of_variables)
+            );
+            std::vector<uint8_t> requested_variables(
+                static_cast<std::size_t>(number_of_variables),
+                1
+            );
+            ExactMatchedScratch_ all_matched_scratch;
+
+            auto all_extrema =
+                collect_exact_local_importance_numerator_extrema_all_at_most_(
+                result.get(),
+                setup.budget,
+                setup.root_mask,
+                setup.root_mask,
+                root_states,
+                requested_variables,
+                setup.internal_to_variable,
+                setup.ctx,
+                setup.y_bits,
+                BBwrong_eval_ptr,
+                setup.use_matched_groups
+                    ? &matched_group_of_row_by_variable_eval
+                    : nullptr,
+                setup.use_matched_groups
+                    ? &matched_group_size_by_variable_eval
+                    : nullptr,
+                setup.use_matched_groups
+                    ? &setup.matched_group_effectively_uniform
+                    : nullptr,
+                setup.use_matched_groups
+                    ? &all_matched_scratch
+                    : nullptr,
+                node_variable_masks
+            );
+
+        if (all_extrema.empty()) return {};
+
+        for (int variable = 0;
+             variable < number_of_variables;
+             ++variable) {
+            const std::size_t j = static_cast<std::size_t>(variable);
+            auto& extrema = all_extrema[j];
+            if (extrema.empty()) return {};
+            if (extrema.all_zero) {
+                out[j] = {0.0, 0.0};
+                continue;
+            }
+
+            const bool matched_effectively_uniform =
+                setup.use_matched_groups &&
+                setup.matched_group_effectively_uniform[j] != 0;
+
+            if (!setup.use_matched_groups || matched_effectively_uniform) {
+                if (extrema.is_point()) {
+                    const int64_t point_sum = fast_sum_i32_(
+                        extrema.point.data(),
+                        static_cast<std::size_t>(setup.ctx.n_eval)
+                    );
+                    const double scale =
+                        inv_n / static_cast<double>(setup.ctx.n_eval);
+                    const double value =
+                        static_cast<double>(point_sum) * scale;
+                    out[j] = {value, value};
+                } else {
+                    const int64_t lower_sum = fast_sum_i32_(
+                        extrema.lower.data(),
+                        static_cast<std::size_t>(setup.ctx.n_eval)
+                    );
+                    const int64_t upper_sum = fast_sum_i32_(
+                        extrema.upper.data(),
+                        static_cast<std::size_t>(setup.ctx.n_eval)
+                    );
+                    const double scale =
+                        inv_n / static_cast<double>(setup.ctx.n_eval);
+                    out[j] = {
+                        static_cast<double>(lower_sum) * scale,
+                        static_cast<double>(upper_sum) * scale
+                    };
+                }
+                continue;
+            }
+
+            const auto& group_of_row =
+                matched_group_of_row_by_variable_eval[j];
+            const auto& group_sizes =
+                matched_group_size_by_variable_eval[j];
+            double lower_sum = 0.0;
+            double upper_sum = 0.0;
+            for (int row = 0; row < setup.ctx.n_eval; ++row) {
+                const int group = group_of_row[static_cast<std::size_t>(row)];
+                const int group_size = group_sizes[static_cast<std::size_t>(group)];
+                if (extrema.is_point()) {
+                    const double value =
+                        static_cast<double>(
+                            extrema.point[static_cast<std::size_t>(row)]
+                        ) / static_cast<double>(group_size);
+                    lower_sum += value;
+                    upper_sum += value;
+                } else {
+                    lower_sum +=
+                        static_cast<double>(
+                            extrema.lower[static_cast<std::size_t>(row)]
+                        ) / static_cast<double>(group_size);
+                    upper_sum +=
+                        static_cast<double>(
+                            extrema.upper[static_cast<std::size_t>(row)]
+                        ) / static_cast<double>(group_size);
+                }
+            }
+            out[j] = {lower_sum * inv_n, upper_sum * inv_n};
+        }
+
+            return out;
+        }
 
         for (int variable = 0;
              variable < number_of_variables;
@@ -20769,6 +21460,20 @@ public:
             }
 
             if (!setup.use_matched_groups || matched_effectively_uniform) {
+                if (extrema.is_point()) {
+                    const int64_t point_sum =
+                        fast_sum_i32_(
+                            extrema.point.data(),
+                            static_cast<std::size_t>(setup.ctx.n_eval)
+                        );
+                    const double scale =
+                        inv_n / static_cast<double>(setup.ctx.n_eval);
+                    const double value =
+                        static_cast<double>(point_sum) * scale;
+                    out[static_cast<std::size_t>(variable)] = {value, value};
+                    continue;
+                }
+
                 const int64_t lower_sum =
                     fast_sum_i32_(
                         extrema.lower.data(),
@@ -20804,17 +21509,27 @@ public:
                         static_cast<std::size_t>(group)
                     ];
 
-                lower_sum +=
-                    static_cast<double>(
-                        extrema.lower[static_cast<std::size_t>(row)]
-                    ) /
-                    static_cast<double>(group_size);
+                if (extrema.is_point()) {
+                    const double value =
+                        static_cast<double>(
+                            extrema.point[static_cast<std::size_t>(row)]
+                        ) /
+                        static_cast<double>(group_size);
+                    lower_sum += value;
+                    upper_sum += value;
+                } else {
+                    lower_sum +=
+                        static_cast<double>(
+                            extrema.lower[static_cast<std::size_t>(row)]
+                        ) /
+                        static_cast<double>(group_size);
 
-                upper_sum +=
-                    static_cast<double>(
-                        extrema.upper[static_cast<std::size_t>(row)]
-                    ) /
-                    static_cast<double>(group_size);
+                    upper_sum +=
+                        static_cast<double>(
+                            extrema.upper[static_cast<std::size_t>(row)]
+                        ) /
+                        static_cast<double>(group_size);
+                }
             }
 
             out[static_cast<std::size_t>(variable)] = {
