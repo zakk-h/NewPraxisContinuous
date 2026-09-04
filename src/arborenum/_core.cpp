@@ -2060,6 +2060,58 @@ PYBIND11_MODULE(_core, m) {
             "continuous feature group."
         )
 
+        .def(
+            "get_exact_replacement_importance_intervals_packed_trie",
+            [](const ArborEnum& self,
+               py::array_t<
+                   uint8_t,
+                   py::array::c_style | py::array::forcecast
+               > X_eval,
+               py::array_t<
+                   int,
+                   py::array::c_style | py::array::forcecast
+               > y_eval,
+               int budget_override,
+               const std::vector<std::vector<int>>& variable_columns,
+               py::array_t<
+                   int,
+                   py::array::c_style | py::array::forcecast
+               > bb_pred_eval,
+               bool sum_samplewise_extrema) {
+
+                auto X_vec =
+                    numpy_uint8_2d_to_row_major(X_eval, "X_eval");
+
+                auto y_vec =
+                    numpy_int_1d_to_vector(y_eval, "y_eval");
+
+                auto bb_vec =
+                    numpy_int_1d_to_vector(
+                        bb_pred_eval,
+                        "bb_pred_eval"
+                    );
+
+                return self
+                    .get_exact_replacement_importance_intervals_packed_trie(
+                        X_vec,
+                        y_vec,
+                        budget_override,
+                        variable_columns,
+                        bb_vec,
+                        {}, // matched_group_of_row_by_variable_eval
+                        {}, // matched_group_size_by_variable_eval
+                        sum_samplewise_extrema
+                    );
+            },
+            py::arg("X_eval"),
+            py::arg("y_eval"),
+            py::arg("budget_override") = -1,
+            py::arg("variable_columns") =
+                std::vector<std::vector<int>>{},
+            py::arg("bb_pred_eval") = py::array_t<int>(0),
+            py::arg("sum_samplewise_extrema") = false
+        )
+
 
         .def(
             "training_samples_with_multiple_reachable_predictions",

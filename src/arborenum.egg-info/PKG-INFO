@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: arborenum
-Version: 0.2.3
+Version: 0.2.4
 Summary: Exact, approximate, and anytime decision tree Rashomon sets over binary and continuous features
 Requires-Python: >=3.9
 Description-Content-Type: text/markdown

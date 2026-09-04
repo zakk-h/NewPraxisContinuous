@@ -986,24 +986,55 @@ RIDResult compute_rid_subtractive_mr_bootstrap(
                 const auto exact_start =
                     std::chrono::steady_clock::now();
 
-                const uint64_t number_of_trees =
-                    model.result->count_leq(budget_override);
+                const uint64_t number_of_trees = trees_at_budget;
 
                 if (number_of_trees == 0) {
                     continue;
                 }
 
-                auto intervals =
-                    model.get_exact_replacement_importance_intervals_packed_trie(
-                        X_bootstrap,
-                        y_bootstrap,
-                        budget_override,
-                        variable_columns,
-                        {},
-                        matched_group_of_bootstrap_row_by_variable,
-                        matched_group_size_bootstrap_by_variable,
-                        importance_interval_mode == 2
-                    );
+                // auto intervals =
+                //     model.get_exact_replacement_importance_intervals_packed_trie(
+                //         X_bootstrap,
+                //         y_bootstrap,
+                //         budget_override,
+                //         variable_columns,
+                //         {},
+                //         matched_group_of_bootstrap_row_by_variable,
+                //         matched_group_size_bootstrap_by_variable,
+                //         importance_interval_mode == 2
+                //     );
+
+                const bool use_new_cached_frontier_method = false;
+
+                std::vector<ArborEnum::ExactImportanceInterval> intervals;
+
+                if (
+                    use_new_cached_frontier_method &&
+                    importance_interval_mode == 1
+                ) {
+                    intervals =
+                        model.get_exact_replacement_importance_intervals_cached_frontier_packed_trie(
+                            X_bootstrap,
+                            y_bootstrap,
+                            budget_override,
+                            variable_columns,
+                            {},
+                            matched_group_of_bootstrap_row_by_variable,
+                            matched_group_size_bootstrap_by_variable
+                        );
+                } else {
+                    intervals =
+                        model.get_exact_replacement_importance_intervals_packed_trie(
+                            X_bootstrap,
+                            y_bootstrap,
+                            budget_override,
+                            variable_columns,
+                            {},
+                            matched_group_of_bootstrap_row_by_variable,
+                            matched_group_size_bootstrap_by_variable,
+                            importance_interval_mode == 2
+                        );
+                }
 
                 if (
                     intervals.size() !=

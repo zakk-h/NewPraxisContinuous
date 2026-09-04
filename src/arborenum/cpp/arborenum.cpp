@@ -20787,6 +20787,1144 @@ private:
         return out;
     }
 
+    struct ExactImportanceFrontierPoint_ {
+        int obj = 0;
+        double value = 0.0;
+    };
+
+    using ExactImportanceFrontier_ =
+        std::vector<ExactImportanceFrontierPoint_>;
+
+    struct ExactSparseFeatureImportanceFrontiers_ {
+        int variable = -1;
+        ExactImportanceFrontier_ lower;
+        ExactImportanceFrontier_ upper;
+    };
+
+    // sparse by variable. a variable is absent iff its importance is
+    // identically zero for every feasible completion represented here.
+    struct ExactGlobalImportanceFrontiers_ {
+        int min_feasible_obj = std::numeric_limits<int>::max();
+        std::vector<ExactSparseFeatureImportanceFrontiers_> features;
+    };
+
+    struct ExactImportanceBinaryConstraint_ {
+        int feature = -1; // internal binary feature column
+        int8_t value = -1; // 0 = false/right, 1 = true/left
+
+        bool operator==(const ExactImportanceBinaryConstraint_& o) const {
+            return feature == o.feature && value == o.value;
+        }
+    };
+
+    struct ExactImportanceContinuousConstraint_ {
+        int group = -1; // position in continuous_starts
+        int lo = -1; // canonical active-threshold interval [lo, hi)
+        int hi = -1;
+
+        bool operator==(const ExactImportanceContinuousConstraint_& o) const {
+            return group == o.group && lo == o.lo && hi == o.hi;
+        }
+    };
+
+    // only constrained features/groups are stored. both vectors are kept sorted
+    struct ExactImportanceSemanticPath_ {
+        std::vector<ExactImportanceBinaryConstraint_> binary;
+        std::vector<ExactImportanceContinuousConstraint_> continuous;
+    };
+
+    // only variables whose replacement routing has actually been activated
+    // on the path are materialized. sorted by original-variable id.
+    struct ExactSparseReplacementState_ {
+        int variable = -1;
+        ExactReplacementState_ state;
+    };
+
+    using ExactSparseReplacementStates_ =
+        std::vector<ExactSparseReplacementState_>;
+
+    struct ExactGlobalImportanceFrontierCacheEntry_ {
+        // the entry contains all frontier breakpoints through this budget.
+        // it may therefore answer any later query with a smaller budget.
+        int solved_budget = -1;
+        ExactGlobalImportanceFrontiers_ frontiers;
+    };
+
+    using ExactGlobalImportanceFrontierCache_ =
+        std::unordered_map<
+            std::string,
+            std::shared_ptr<ExactGlobalImportanceFrontierCacheEntry_>
+        >;
+
+    struct ExactFeatureFrontierAccumulator_ {
+        std::map<int, double> lower;
+        std::map<int, double> upper;
+    };
+
+    template <typename T>
+    static inline void append_exact_importance_key_bytes_(
+        std::string& key,
+        const T& value
+    ) {
+        const char* p = reinterpret_cast<const char*>(&value);
+        key.append(p, sizeof(T));
+    }
+
+    std::string exact_importance_semantic_cache_key_(
+        const ExactImportanceSemanticPath_& path,
+        int remaining_depth
+    ) const {
+        std::string key;
+
+        const uint32_t number_of_binary =
+            static_cast<uint32_t>(path.binary.size());
+        const uint32_t number_of_continuous =
+            static_cast<uint32_t>(path.continuous.size());
+
+        key.reserve(
+            sizeof(int) +
+            sizeof(uint32_t) * 2 +
+            path.binary.size() * (sizeof(int) + sizeof(int8_t)) +
+            path.continuous.size() * 3 * sizeof(int)
+        );
+
+        append_exact_importance_key_bytes_(key, remaining_depth);
+        append_exact_importance_key_bytes_(key, number_of_binary);
+
+        for (const auto& c : path.binary) {
+            append_exact_importance_key_bytes_(key, c.feature);
+            append_exact_importance_key_bytes_(key, c.value);
+        }
+
+        append_exact_importance_key_bytes_(key, number_of_continuous);
+
+        for (const auto& c : path.continuous) {
+            append_exact_importance_key_bytes_(key, c.group);
+            append_exact_importance_key_bytes_(key, c.lo);
+            append_exact_importance_key_bytes_(key, c.hi);
+        }
+
+        return key;
+    }
+
+    static inline void set_exact_importance_binary_constraint_(
+        std::vector<ExactImportanceBinaryConstraint_>& constraints,
+        int feature,
+        int8_t value
+    ) {
+        auto it = std::lower_bound(
+            constraints.begin(),
+            constraints.end(),
+            feature,
+            [](const ExactImportanceBinaryConstraint_& c, int f) {
+                return c.feature < f;
+            }
+        );
+
+        if (it != constraints.end() && it->feature == feature) {
+            if (it->value != value) {
+                throw std::runtime_error(
+                    "Cached global importance reached contradictory binary "
+                    "path constraints."
+                );
+            }
+            return;
+        }
+
+        constraints.insert(
+            it,
+            ExactImportanceBinaryConstraint_{feature, value}
+        );
+    }
+
+    void set_exact_importance_continuous_constraint_(
+        std::vector<ExactImportanceContinuousConstraint_>& constraints,
+        int split_feature,
+        bool take_left
+    ) const {
+        const int group =
+            continuous_group_pos_for_threshold_(split_feature);
+
+        if (group < 0) {
+            throw std::runtime_error(
+                "Cached global importance could not map a continuous split "
+                "to its continuous group."
+            );
+        }
+
+        const int default_lo =
+            continuous_starts[static_cast<std::size_t>(group)];
+        const int default_hi = continuous_group_end_(group);
+
+        auto it = std::lower_bound(
+            constraints.begin(),
+            constraints.end(),
+            group,
+            [](const ExactImportanceContinuousConstraint_& c, int g) {
+                return c.group < g;
+            }
+        );
+
+        int lo = default_lo;
+        int hi = default_hi;
+
+        if (it != constraints.end() && it->group == group) {
+            lo = it->lo;
+            hi = it->hi;
+        }
+
+        // based on ContinuousPath:
+        // left/true tightens hi to split_feature;
+        // right/false tightens lo to split_feature + 1.
+        if (take_left) {
+            hi = std::min(hi, split_feature);
+        } else {
+            lo = std::max(lo, split_feature + 1);
+        }
+
+        if (it != constraints.end() && it->group == group) {
+            it->lo = lo;
+            it->hi = hi;
+        } else {
+            constraints.insert(
+                it,
+                ExactImportanceContinuousConstraint_{group, lo, hi}
+            );
+        }
+    }
+
+    void make_exact_importance_child_semantic_paths_(
+        int split_feature,
+        const ExactImportanceSemanticPath_& parent,
+        ExactImportanceSemanticPath_& left,
+        ExactImportanceSemanticPath_& right
+    ) const {
+        left = parent;
+        right = parent;
+
+        if (is_continuous_threshold_feature_(split_feature)) {
+            set_exact_importance_continuous_constraint_(
+                left.continuous,
+                split_feature,
+                true
+            );
+            set_exact_importance_continuous_constraint_(
+                right.continuous,
+                split_feature,
+                false
+            );
+            return;
+        }
+
+        set_exact_importance_binary_constraint_(
+            left.binary,
+            split_feature,
+            1
+        );
+        set_exact_importance_binary_constraint_(
+            right.binary,
+            split_feature,
+            0
+        );
+    }
+
+    static inline const ExactReplacementState_*
+    find_exact_sparse_replacement_state_(
+        const ExactSparseReplacementStates_& states,
+        int variable
+    ) {
+        auto it = std::lower_bound(
+            states.begin(),
+            states.end(),
+            variable,
+            [](const ExactSparseReplacementState_& s, int v) {
+                return s.variable < v;
+            }
+        );
+
+        if (it == states.end() || it->variable != variable) {
+            return nullptr;
+        }
+        return &it->state;
+    }
+
+    void make_exact_importance_child_sparse_states_(
+        int split_variable,
+        const Packed& Xf,
+        const Packed& original_mask,
+        const Packed& replacement_root_mask,
+        const ExactSparseReplacementStates_& states,
+        const EvalCtx& ctx,
+        ExactSparseReplacementStates_& left_states,
+        ExactSparseReplacementStates_& right_states
+    ) const {
+        left_states.clear();
+        right_states.clear();
+        left_states.reserve(states.size() + 1);
+        right_states.reserve(states.size() + 1);
+
+        bool saw_split_variable = false;
+
+        for (const auto& sparse : states) {
+            const int variable = sparse.variable;
+            const auto& cur = sparse.state;
+
+            if (!cur.replacement_feature_used) {
+                throw std::runtime_error(
+                    "Sparse replacement state contained an inactive entry."
+                );
+            }
+
+            ExactReplacementState_ ls;
+            ExactReplacementState_ rs;
+            ls.replacement_feature_used = true;
+            rs.replacement_feature_used = true;
+
+            ls.target_rows = Packed(
+                static_cast<std::size_t>(ctx.n_words)
+            );
+            rs.target_rows = Packed(
+                static_cast<std::size_t>(ctx.n_words)
+            );
+            ls.replacement_values = Packed(
+                static_cast<std::size_t>(ctx.n_words)
+            );
+            rs.replacement_values = Packed(
+                static_cast<std::size_t>(ctx.n_words)
+            );
+
+            if (variable == split_variable) {
+                saw_split_variable = true;
+
+                ls.target_rows.w = cur.target_rows.w;
+                rs.target_rows.w = cur.target_rows.w;
+
+                and_bits_eval(
+                    cur.replacement_values,
+                    Xf,
+                    ls.replacement_values,
+                    ctx.n_words,
+                    ctx.tail_mask
+                );
+                andnot_bits_eval(
+                    cur.replacement_values,
+                    Xf,
+                    rs.replacement_values,
+                    ctx.n_words,
+                    ctx.tail_mask
+                );
+            } else {
+                and_bits_eval(
+                    cur.target_rows,
+                    Xf,
+                    ls.target_rows,
+                    ctx.n_words,
+                    ctx.tail_mask
+                );
+                andnot_bits_eval(
+                    cur.target_rows,
+                    Xf,
+                    rs.target_rows,
+                    ctx.n_words,
+                    ctx.tail_mask
+                );
+
+                ls.replacement_values.w = cur.replacement_values.w;
+                rs.replacement_values.w = cur.replacement_values.w;
+            }
+
+            left_states.push_back(
+                ExactSparseReplacementState_{variable, std::move(ls)}
+            );
+            right_states.push_back(
+                ExactSparseReplacementState_{variable, std::move(rs)}
+            );
+        }
+
+        if (!saw_split_variable) {
+            ExactReplacementState_ ls;
+            ExactReplacementState_ rs;
+            ls.replacement_feature_used = true;
+            rs.replacement_feature_used = true;
+
+            // first time this replacement variable appears on the path:
+            // target rows are not split by their own value; donor values are.
+            ls.target_rows = original_mask;
+            rs.target_rows = original_mask;
+            ls.replacement_values = Packed(
+                static_cast<std::size_t>(ctx.n_words)
+            );
+            rs.replacement_values = Packed(
+                static_cast<std::size_t>(ctx.n_words)
+            );
+
+            and_bits_eval(
+                replacement_root_mask,
+                Xf,
+                ls.replacement_values,
+                ctx.n_words,
+                ctx.tail_mask
+            );
+            andnot_bits_eval(
+                replacement_root_mask,
+                Xf,
+                rs.replacement_values,
+                ctx.n_words,
+                ctx.tail_mask
+            );
+
+            auto lit = std::lower_bound(
+                left_states.begin(),
+                left_states.end(),
+                split_variable,
+                [](const ExactSparseReplacementState_& s, int v) {
+                    return s.variable < v;
+                }
+            );
+            const std::size_t pos =
+                static_cast<std::size_t>(
+                    std::distance(left_states.begin(), lit)
+                );
+
+            left_states.insert(
+                lit,
+                ExactSparseReplacementState_{
+                    split_variable,
+                    std::move(ls)
+                }
+            );
+            right_states.insert(
+                right_states.begin() + static_cast<std::ptrdiff_t>(pos),
+                ExactSparseReplacementState_{
+                    split_variable,
+                    std::move(rs)
+                }
+            );
+        }
+    }
+
+    // maintain an at-most-budget lower frontier in-place.
+    // frontier invariant: objective strictly increases and value strictly decreases.
+    static inline void insert_exact_min_frontier_point_(
+        std::map<int, double>& frontier,
+        int obj,
+        double value
+    ) {
+        auto it = frontier.lower_bound(obj);
+
+        if (it != frontier.end() && it->first == obj) {
+            if (it->second <= value) {
+                return;
+            }
+            it->second = value;
+        } else {
+            if (it != frontier.begin()) {
+                const auto prev = std::prev(it);
+                if (prev->second <= value) {
+                    return;
+                }
+            }
+            it = frontier.emplace_hint(it, obj, value);
+        }
+
+        if (it != frontier.begin()) {
+            const auto prev = std::prev(it);
+            if (prev->second <= it->second) {
+                frontier.erase(it);
+                return;
+            }
+        }
+
+        auto next = std::next(it);
+        while (
+            next != frontier.end() &&
+            next->second >= it->second
+        ) {
+            next = frontier.erase(next);
+        }
+    }
+
+    // maintain an at-most-budget upper frontier in-place.
+    // frontier invariant: objective strictly increases and value strictly increases.
+    static inline void insert_exact_max_frontier_point_(
+        std::map<int, double>& frontier,
+        int obj,
+        double value
+    ) {
+        auto it = frontier.lower_bound(obj);
+
+        if (it != frontier.end() && it->first == obj) {
+            if (it->second >= value) {
+                return;
+            }
+            it->second = value;
+        } else {
+            if (it != frontier.begin()) {
+                const auto prev = std::prev(it);
+                if (prev->second >= value) {
+                    return;
+                }
+            }
+            it = frontier.emplace_hint(it, obj, value);
+        }
+
+        if (it != frontier.begin()) {
+            const auto prev = std::prev(it);
+            if (prev->second >= it->second) {
+                frontier.erase(it);
+                return;
+            }
+        }
+
+        auto next = std::next(it);
+        while (
+            next != frontier.end() &&
+            next->second <= it->second
+        ) {
+            next = frontier.erase(next);
+        }
+    }
+
+    static inline ExactImportanceFrontier_
+    exact_frontier_map_to_vector_(
+        const std::map<int, double>& frontier
+    ) {
+        ExactImportanceFrontier_ out;
+        out.reserve(frontier.size());
+
+        for (const auto& [obj, value] : frontier) {
+            out.push_back(ExactImportanceFrontierPoint_{obj, value});
+        }
+
+        return out;
+    }
+
+    static inline double exact_frontier_value_at_budget_(
+        const ExactImportanceFrontier_& frontier,
+        int budget
+    ) {
+        const auto it = std::upper_bound(
+            frontier.begin(),
+            frontier.end(),
+            budget,
+            [](int b, const ExactImportanceFrontierPoint_& p) {
+                return b < p.obj;
+            }
+        );
+
+        if (it == frontier.begin()) {
+            throw std::runtime_error(
+                "No cached importance-frontier point is feasible at the "
+                "requested budget."
+            );
+        }
+
+        return std::prev(it)->value;
+    }
+
+    static inline const ExactSparseFeatureImportanceFrontiers_*
+    find_exact_sparse_feature_frontiers_(
+        const ExactGlobalImportanceFrontiers_& frontiers,
+        int variable
+    ) {
+        auto it = std::lower_bound(
+            frontiers.features.begin(),
+            frontiers.features.end(),
+            variable,
+            [](const ExactSparseFeatureImportanceFrontiers_& f, int v) {
+                return f.variable < v;
+            }
+        );
+
+        if (
+            it == frontiers.features.end() ||
+            it->variable != variable
+        ) {
+            return nullptr;
+        }
+        return &(*it);
+    }
+
+    static inline std::vector<int>
+    exact_sparse_feature_union_(
+        const ExactGlobalImportanceFrontiers_& left,
+        const ExactGlobalImportanceFrontiers_& right
+    ) {
+        std::vector<int> out;
+        out.reserve(left.features.size() + right.features.size());
+
+        std::size_t li = 0;
+        std::size_t ri = 0;
+
+        while (
+            li < left.features.size() ||
+            ri < right.features.size()
+        ) {
+            if (
+                ri >= right.features.size() ||
+                (li < left.features.size() &&
+                 left.features[li].variable < right.features[ri].variable)
+            ) {
+                out.push_back(left.features[li].variable);
+                ++li;
+            } else if (
+                li >= left.features.size() ||
+                right.features[ri].variable < left.features[li].variable
+            ) {
+                out.push_back(right.features[ri].variable);
+                ++ri;
+            } else {
+                out.push_back(left.features[li].variable);
+                ++li;
+                ++ri;
+            }
+        }
+
+        return out;
+    }
+
+    static inline bool packed_equal_exact_(
+        const Packed& a,
+        const Packed& b
+    ) {
+        return a.w == b.w;
+    }
+
+    void require_exact_importance_eval_is_training_(
+        const ExactReplacementIntervalEvalSetup_& setup,
+        const std::vector<int>& y_eval
+    ) const {
+        if (setup.ctx.n_eval != n_samples) {
+            throw std::runtime_error(
+                "Cached global importance currently requires evaluation data "
+                "to be exactly the training data (row count differs)."
+            );
+        }
+
+        if (setup.ctx.X_bits_eval.size() != X_bits.size()) {
+            throw std::runtime_error(
+                "Cached global importance currently requires evaluation X "
+                "to be exactly the training X."
+            );
+        }
+
+        for (std::size_t f = 0; f < X_bits.size(); ++f) {
+            if (!packed_equal_exact_(setup.ctx.X_bits_eval[f], X_bits[f])) {
+                throw std::runtime_error(
+                    "Cached global importance currently requires evaluation X "
+                    "to be exactly the training X."
+                );
+            }
+        }
+
+        if (y_eval != y_train) {
+            throw std::runtime_error(
+                "Cached global importance currently requires evaluation y "
+                "to be exactly the training y."
+            );
+        }
+
+        if (
+            use_deferral &&
+            (!setup.has_bb_wrong ||
+             !packed_equal_exact_(setup.bb_wrong, BBwrong))
+        ) {
+            throw std::runtime_error(
+                "Cached global importance with deferral requires evaluation "
+                "black-box predictions to match the training black-box "
+                "predictions."
+            );
+        }
+    }
+
+    static inline void insert_zero_for_sparse_feature_accumulator_(
+        ExactFeatureFrontierAccumulator_& acc,
+        int obj
+    ) {
+        if (obj == std::numeric_limits<int>::max()) return;
+        insert_exact_min_frontier_point_(acc.lower, obj, 0.0);
+        insert_exact_max_frontier_point_(acc.upper, obj, 0.0);
+    }
+
+    std::shared_ptr<const ExactGlobalImportanceFrontierCacheEntry_>
+    collect_exact_global_importance_frontiers_cached_(
+        const TreeTrieNode* node,
+        int remaining_depth,
+        int delta,
+        const Packed& original_mask,
+        const Packed& replacement_root_mask,
+        const ExactSparseReplacementStates_& states,
+        const ExactImportanceSemanticPath_& semantic_path,
+        const std::vector<int>& internal_to_variable,
+        const EvalCtx& ctx,
+        const std::vector<Packed>& Y_eval_bits,
+        const Packed* BBwrong_eval,
+        const std::vector<std::vector<int>>*
+            matched_group_of_row_by_variable_eval,
+        const std::vector<std::vector<double>>*
+            matched_group_inv_size_by_variable_eval,
+        const std::vector<uint8_t>*
+            matched_group_effectively_uniform_by_variable_eval,
+        ExactMatchedScratch_* matched_scratch,
+        ExactGlobalImportanceFrontierCache_& cache
+    ) const {
+        if (!node || remaining_depth < 0) {
+            return nullptr;
+        }
+
+        constexpr int INF = std::numeric_limits<int>::max();
+
+        // The canonical node stores the largest budget ever solved there.
+        // Reducing the root budget by delta shifts that largest reachable
+        // node budget down by the same delta.
+        const int budget = node->budget - delta;
+
+        if (
+            budget < 0 ||
+            node->min_objective == INF ||
+            node->min_objective > budget
+        ) {
+            return nullptr;
+        }
+
+        const std::string cache_key =
+            exact_importance_semantic_cache_key_(
+                semantic_path,
+                remaining_depth
+            );
+
+        if (auto it = cache.find(cache_key); it != cache.end()) {
+            if (it->second && it->second->solved_budget >= budget) {
+                return it->second;
+            }
+        }
+
+        // Sparse by variable: a feature accumulator is created only when
+        // that variable is already active on the path or is discovered in
+        // a feasible descendant split.
+        std::map<int, ExactFeatureFrontierAccumulator_> feature_acc;
+
+        // Minimum objective among OR alternatives processed so far.  When a
+        // previously unseen variable is discovered later, all earlier
+        // alternatives had zero importance for it, so this single number is
+        // sufficient to seed its zero point exactly.
+        int prior_min_feasible_obj = INF;
+        bool saw_solution = false;
+
+        // OR alternatives: leaves.
+        for (const auto& leaf : node->leaves) {
+            if (leaf.loss > budget) continue;
+
+            const int original_mistakes =
+                exact_wrong_count_for_leaf_(
+                    original_mask,
+                    leaf.prediction,
+                    ctx,
+                    Y_eval_bits,
+                    BBwrong_eval
+                );
+
+            // existing sparse parent variables that are not active on this
+            // path get exactly zero importance for this leaf alternative.
+            for (auto& [variable, acc] : feature_acc) {
+                if (
+                    find_exact_sparse_replacement_state_(
+                        states,
+                        variable
+                    ) == nullptr
+                ) {
+                    insert_zero_for_sparse_feature_accumulator_(
+                        acc,
+                        leaf.loss
+                    );
+                }
+            }
+
+            // only variables already activated by an ancestor split need a leaf importance calculation
+            for (const auto& sparse : states) {
+                const int variable = sparse.variable;
+                const auto& state = sparse.state;
+
+                auto [it, inserted] =
+                    feature_acc.try_emplace(variable);
+
+                // if this variable is first materialized only now, every
+                // previously processed OR alternative was zero for it.
+                if (inserted && prior_min_feasible_obj != INF) {
+                    insert_zero_for_sparse_feature_accumulator_(
+                        it->second,
+                        prior_min_feasible_obj
+                    );
+                }
+
+                const double replacement_mistakes =
+                    exact_replacement_expected_mistakes_for_leaf_variable_(
+                        state,
+                        variable,
+                        leaf.prediction,
+                        original_mistakes,
+                        ctx,
+                        Y_eval_bits,
+                        BBwrong_eval,
+                        matched_group_of_row_by_variable_eval,
+                        matched_group_inv_size_by_variable_eval,
+                        matched_group_effectively_uniform_by_variable_eval,
+                        matched_scratch
+                    );
+
+                const double importance =
+                    replacement_mistakes -
+                    static_cast<double>(original_mistakes);
+
+                insert_exact_min_frontier_point_(
+                    it->second.lower,
+                    leaf.loss,
+                    importance
+                );
+                insert_exact_max_frontier_point_(
+                    it->second.upper,
+                    leaf.loss,
+                    importance
+                );
+            }
+
+            prior_min_feasible_obj =
+                std::min(prior_min_feasible_obj, leaf.loss);
+            saw_solution = true;
+        }
+
+        // OR alternatives: split choices.
+        if (remaining_depth > 0) {
+            for (const auto& split : node->splits) {
+                const TreeTrieNode* L = split.left.get();
+                const TreeTrieNode* R = split.right.get();
+
+                if (!L || !R) continue;
+
+                const int minL = L->min_objective;
+                const int minR = R->min_objective;
+
+                if (minL == INF || minR == INF) continue;
+                if (minL + minR > budget) continue;
+
+                if (
+                    split.feature < 0 ||
+                    split.feature >=
+                        static_cast<int>(internal_to_variable.size())
+                ) {
+                    throw std::runtime_error(
+                        "Cached global importance saw an invalid split feature."
+                    );
+                }
+
+                const int split_variable =
+                    internal_to_variable[
+                        static_cast<std::size_t>(split.feature)
+                    ];
+
+                if (split_variable < 0) {
+                    throw std::runtime_error(
+                        "Cached global importance split feature is not mapped "
+                        "to an original variable."
+                    );
+                }
+
+                const Packed& Xf =
+                    ctx.X_bits_eval[
+                        static_cast<std::size_t>(split.feature)
+                    ];
+
+                Packed original_left(
+                    static_cast<std::size_t>(ctx.n_words)
+                );
+                Packed original_right(
+                    static_cast<std::size_t>(ctx.n_words)
+                );
+
+                and_bits_eval(
+                    original_mask,
+                    Xf,
+                    original_left,
+                    ctx.n_words,
+                    ctx.tail_mask
+                );
+                andnot_bits_eval(
+                    original_mask,
+                    Xf,
+                    original_right,
+                    ctx.n_words,
+                    ctx.tail_mask
+                );
+
+                ExactSparseReplacementStates_ left_states;
+                ExactSparseReplacementStates_ right_states;
+
+                make_exact_importance_child_sparse_states_(
+                    split_variable,
+                    Xf,
+                    original_mask,
+                    replacement_root_mask,
+                    states,
+                    ctx,
+                    left_states,
+                    right_states
+                );
+
+                ExactImportanceSemanticPath_ left_path;
+                ExactImportanceSemanticPath_ right_path;
+
+                make_exact_importance_child_semantic_paths_(
+                    split.feature,
+                    semantic_path,
+                    left_path,
+                    right_path
+                );
+
+                // deliberately do not subtract the sibling minimum objective before recursion. 
+                // use canonical root node budget - delta for all nodes, solving to exactly what you would need for any way you reach it
+                auto left_entry =
+                    collect_exact_global_importance_frontiers_cached_(
+                        L,
+                        remaining_depth - 1,
+                        delta,
+                        original_left,
+                        replacement_root_mask,
+                        left_states,
+                        left_path,
+                        internal_to_variable,
+                        ctx,
+                        Y_eval_bits,
+                        BBwrong_eval,
+                        matched_group_of_row_by_variable_eval,
+                        matched_group_inv_size_by_variable_eval,
+                        matched_group_effectively_uniform_by_variable_eval,
+                        matched_scratch,
+                        cache
+                    );
+
+                auto right_entry =
+                    collect_exact_global_importance_frontiers_cached_(
+                        R,
+                        remaining_depth - 1,
+                        delta,
+                        original_right,
+                        replacement_root_mask,
+                        right_states,
+                        right_path,
+                        internal_to_variable,
+                        ctx,
+                        Y_eval_bits,
+                        BBwrong_eval,
+                        matched_group_of_row_by_variable_eval,
+                        matched_group_inv_size_by_variable_eval,
+                        matched_group_effectively_uniform_by_variable_eval,
+                        matched_scratch,
+                        cache
+                    );
+
+                if (!left_entry || !right_entry) continue;
+
+                const auto& LF = left_entry->frontiers;
+                const auto& RF = right_entry->frontiers;
+
+                const int left_budget = L->budget - delta;
+                const int right_budget = R->budget - delta;
+
+                if (
+                    LF.min_feasible_obj == INF ||
+                    RF.min_feasible_obj == INF ||
+                    LF.min_feasible_obj > left_budget ||
+                    RF.min_feasible_obj > right_budget
+                ) {
+                    continue;
+                }
+
+                const int split_min_obj =
+                    LF.min_feasible_obj + RF.min_feasible_obj;
+
+                if (split_min_obj > budget) continue;
+
+                const std::vector<int> split_variables =
+                    exact_sparse_feature_union_(LF, RF);
+
+                // any parent feature already known but absent from this split
+                // is identically zero for every completion under this split.
+                for (auto& [variable, acc] : feature_acc) {
+                    if (
+                        !std::binary_search(
+                            split_variables.begin(),
+                            split_variables.end(),
+                            variable
+                        )
+                    ) {
+                        insert_zero_for_sparse_feature_accumulator_(
+                            acc,
+                            split_min_obj
+                        );
+                    }
+                }
+
+                for (int variable : split_variables) {
+                    const auto* left_feature =
+                        find_exact_sparse_feature_frontiers_(
+                            LF,
+                            variable
+                        );
+                    const auto* right_feature =
+                        find_exact_sparse_feature_frontiers_(
+                            RF,
+                            variable
+                        );
+
+                    auto [it, inserted] =
+                        feature_acc.try_emplace(variable);
+
+                    // this feature was absent from every earlier OR
+                    // alternative, hence those alternatives contribute zero.
+                    if (inserted && prior_min_feasible_obj != INF) {
+                        insert_zero_for_sparse_feature_accumulator_(
+                            it->second,
+                            prior_min_feasible_obj
+                        );
+                    }
+
+                    auto& parent_feature = it->second;
+
+                    if (left_feature && right_feature) {
+                        // AND convolution for the minimum frontier
+                        for (const auto& lp : left_feature->lower) {
+                            if (lp.obj > left_budget) break;
+                            if (lp.obj > budget) break;
+
+                            const int rem_parent = budget - lp.obj;
+                            const int rem =
+                                std::min(rem_parent, right_budget);
+
+                            for (const auto& rp : right_feature->lower) {
+                                if (rp.obj > rem) break;
+
+                                insert_exact_min_frontier_point_(
+                                    parent_feature.lower,
+                                    lp.obj + rp.obj,
+                                    lp.value + rp.value
+                                );
+                            }
+                        }
+
+                        // AND convolution for the maximum frontier
+                        for (const auto& lp : left_feature->upper) {
+                            if (lp.obj > left_budget) break;
+                            if (lp.obj > budget) break;
+
+                            const int rem_parent = budget - lp.obj;
+                            const int rem =
+                                std::min(rem_parent, right_budget);
+
+                            for (const auto& rp : right_feature->upper) {
+                                if (rp.obj > rem) break;
+
+                                insert_exact_max_frontier_point_(
+                                    parent_feature.upper,
+                                    lp.obj + rp.obj,
+                                    lp.value + rp.value
+                                );
+                            }
+                        }
+                    } else if (left_feature) {
+                        // right side is identically zero for this feature.
+                        // only its cheapest feasible completion can matter.
+                        const int zero_obj = RF.min_feasible_obj;
+
+                        for (const auto& lp : left_feature->lower) {
+                            if (lp.obj > left_budget) break;
+                            const int total_obj = lp.obj + zero_obj;
+                            if (total_obj > budget) break;
+
+                            insert_exact_min_frontier_point_(
+                                parent_feature.lower,
+                                total_obj,
+                                lp.value
+                            );
+                        }
+
+                        for (const auto& lp : left_feature->upper) {
+                            if (lp.obj > left_budget) break;
+                            const int total_obj = lp.obj + zero_obj;
+                            if (total_obj > budget) break;
+
+                            insert_exact_max_frontier_point_(
+                                parent_feature.upper,
+                                total_obj,
+                                lp.value
+                            );
+                        }
+                    } else if (right_feature) {
+                        // left side is identically zero for this feature
+                        const int zero_obj = LF.min_feasible_obj;
+
+                        for (const auto& rp : right_feature->lower) {
+                            if (rp.obj > right_budget) break;
+                            const int total_obj = zero_obj + rp.obj;
+                            if (total_obj > budget) break;
+
+                            insert_exact_min_frontier_point_(
+                                parent_feature.lower,
+                                total_obj,
+                                rp.value
+                            );
+                        }
+
+                        for (const auto& rp : right_feature->upper) {
+                            if (rp.obj > right_budget) break;
+                            const int total_obj = zero_obj + rp.obj;
+                            if (total_obj > budget) break;
+
+                            insert_exact_max_frontier_point_(
+                                parent_feature.upper,
+                                total_obj,
+                                rp.value
+                            );
+                        }
+                    }
+                }
+
+                prior_min_feasible_obj =
+                    std::min(prior_min_feasible_obj, split_min_obj);
+                saw_solution = true;
+            }
+        }
+
+        if (!saw_solution) {
+            return nullptr;
+        }
+
+        auto entry =
+            std::make_shared<ExactGlobalImportanceFrontierCacheEntry_>();
+
+        entry->solved_budget = budget;
+        entry->frontiers.min_feasible_obj = prior_min_feasible_obj;
+        entry->frontiers.features.reserve(feature_acc.size());
+
+        for (const auto& [variable, acc] : feature_acc) {
+            if (acc.lower.empty() || acc.upper.empty()) {
+                throw std::runtime_error(
+                    "Sparse cached global importance created an empty "
+                    "feature frontier."
+                );
+            }
+
+            ExactSparseFeatureImportanceFrontiers_ feature;
+            feature.variable = variable;
+            feature.lower = exact_frontier_map_to_vector_(acc.lower);
+            feature.upper = exact_frontier_map_to_vector_(acc.upper);
+            entry->frontiers.features.push_back(std::move(feature));
+        }
+
+        cache[cache_key] = entry;
+        return entry;
+    }
+
+
 public:
 
     uint8_t reachable_prediction_mask_for_training_sample(int sample_idx) const {
@@ -20869,6 +22007,7 @@ public:
 
         return out;
     }
+
     // main entry: enumerate ALL valid trees under the trie root (or budget_override if >=0),
     // returning (training_objective, prediction vector on evaluation dataset) for each tree.
     // NOTE: this can be extremely large in memory if the Rashomon set is huge.
@@ -21131,6 +22270,171 @@ public:
         return out;
     }
 
+
+    std::vector<ExactImportanceInterval>
+    get_exact_replacement_importance_intervals_cached_frontier_packed_trie(
+        const std::vector<std::vector<uint8_t>>& X_row_major,
+        const std::vector<int>& y_eval,
+        int budget_override = -1,
+        const std::vector<std::vector<int>>& variable_columns_in = {},
+        const std::vector<int>& bb_pred_eval = {},
+        const std::vector<std::vector<int>>&
+            matched_group_of_row_by_variable_eval = {},
+        const std::vector<std::vector<int>>&
+            matched_group_size_by_variable_eval = {}
+    ) const {
+        auto setup =
+            prepare_exact_replacement_interval_eval_(
+                X_row_major,
+                y_eval,
+                budget_override,
+                variable_columns_in,
+                bb_pred_eval,
+                matched_group_of_row_by_variable_eval,
+                matched_group_size_by_variable_eval
+            );
+
+        if (setup.ctx.n_eval <= 0) {
+            return {};
+        }
+
+        require_exact_importance_eval_is_training_(setup, y_eval);
+
+        if (!result) {
+            throw std::runtime_error(
+                "No Rashomon trie has been constructed. Call fit() first."
+            );
+        }
+
+        if (setup.budget > result->budget) {
+            throw std::runtime_error(
+                "Cached global importance can only query a budget no larger "
+                "than the fitted root graph budget."
+            );
+        }
+
+        const int delta = result->budget - setup.budget;
+
+        const int number_of_variables =
+            static_cast<int>(setup.variable_columns.size());
+
+        const Packed* BBwrong_eval_ptr =
+            setup.has_bb_wrong
+                ? &setup.bb_wrong
+                : nullptr;
+
+        const std::vector<std::vector<int>>*
+            matched_group_of_row_by_variable_eval_ptr =
+                setup.use_matched_groups
+                    ? &matched_group_of_row_by_variable_eval
+                    : nullptr;
+
+        const std::vector<std::vector<double>>*
+            matched_group_inv_size_by_variable_eval_ptr =
+                setup.use_matched_groups
+                    ? &setup.matched_group_inv_sizes
+                    : nullptr;
+
+        const std::vector<uint8_t>*
+            matched_group_effectively_uniform_by_variable_eval_ptr =
+                setup.use_matched_groups
+                    ? &setup.matched_group_effectively_uniform
+                    : nullptr;
+
+        ExactMatchedScratch_ matched_scratch;
+        ExactMatchedScratch_* matched_scratch_ptr =
+            setup.use_matched_groups
+                ? &matched_scratch
+                : nullptr;
+
+        // both are intentionally empty at the root. we only materialize replacement states and
+        // semantic path constraints when a feature is actually encountered on a feasible split path.
+        ExactSparseReplacementStates_ root_states;
+        ExactImportanceSemanticPath_ root_path;
+
+        ExactGlobalImportanceFrontierCache_ cache;
+        cache.reserve(1024);
+
+        auto root_entry =
+            collect_exact_global_importance_frontiers_cached_(
+                result.get(),
+                static_cast<int>(trained_depth_budget),
+                delta,
+                setup.root_mask,
+                setup.root_mask,
+                root_states,
+                root_path,
+                setup.internal_to_variable,
+                setup.ctx,
+                setup.y_bits,
+                BBwrong_eval_ptr,
+                matched_group_of_row_by_variable_eval_ptr,
+                matched_group_inv_size_by_variable_eval_ptr,
+                matched_group_effectively_uniform_by_variable_eval_ptr,
+                matched_scratch_ptr,
+                cache
+            );
+
+        if (!root_entry) {
+            return {};
+        }
+
+        const auto& root_frontiers = root_entry->frontiers;
+
+        if (
+            root_frontiers.min_feasible_obj ==
+                std::numeric_limits<int>::max() ||
+            root_frontiers.min_feasible_obj > setup.budget
+        ) {
+            return {};
+        }
+
+        std::vector<ExactImportanceInterval> out(
+            static_cast<std::size_t>(number_of_variables),
+            {0.0, 0.0}
+        );
+
+        const double inv_n =
+            1.0 / static_cast<double>(setup.ctx.n_eval);
+
+        for (int variable = 0;
+             variable < number_of_variables;
+             ++variable) {
+
+            const auto* feature =
+                find_exact_sparse_feature_frontiers_(
+                    root_frontiers,
+                    variable
+                );
+
+            // absent from the sparse root result means no feasible tree in
+            // the queried Rashomon set ever uses this replacement variable,
+            // so its importance is exactly zero.
+            if (!feature) {
+                out[static_cast<std::size_t>(variable)] = {0.0, 0.0};
+                continue;
+            }
+
+            const double lower =
+                exact_frontier_value_at_budget_(
+                    feature->lower,
+                    setup.budget
+                );
+
+            const double upper =
+                exact_frontier_value_at_budget_(
+                    feature->upper,
+                    setup.budget
+                );
+
+            out[static_cast<std::size_t>(variable)] = {
+                lower * inv_n,
+                upper * inv_n
+            };
+        }
+
+        return out;
+    }
 
     // if sum_samplewise_extrema=false, returns
     //   [ min_f Phi_j(f), max_f Phi_j(f) ]
