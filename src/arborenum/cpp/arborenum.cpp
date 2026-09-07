@@ -3714,6 +3714,17 @@ public:
         std::vector<int> B_active_all = all_feature_indices_();
         result = construct_trie(root, depth_budget, obj_bound, root_pk, root_cpath, &B_active_all);
 
+        if (!result) {
+            cout << "Minimum objective: NONE (empty Rashomon set)\n";
+            cout << "Cache sizes - Greedy: " << greedy_cache.size()
+                << ", Lickety: "
+                << (use_kla_cache() ? lickety_cache_kla.size() : lickety_cache_k2.size())
+                << ", Trie: " << trie_cache.size()
+                << ", Trie cache: " << (trie_cache_enabled ? "ON" : "OFF")
+                << "\n";
+            return;
+        }
+
         // cout << "Found " << result->count_trees() << " trees\n"; // we'll let the user compute this query if they want it because it is somewhat expensive
         cout << "Minimum objective: " << result->min_objective << "\n";
         cout << "Cache sizes - Greedy: " << greedy_cache.size()
